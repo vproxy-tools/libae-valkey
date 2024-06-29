@@ -104,8 +104,12 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     struct kevent evs[2];
     int nch = 0;
 
-    if (mask & AE_READABLE) EV_SET(evs + nch++, fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
-    if (mask & AE_WRITABLE) EV_SET(evs + nch++, fd, EVFILT_WRITE, EV_ADD, 0, 0, NULL);
+    MsQuicUserData* ud = &(eventLoop->events[fd].msquicUD);
+    ud->type = CXPLAT_CQE_TYPE_USER_EVENT;
+    ud->fd = fd;
+
+    if (mask & AE_READABLE) EV_SET(evs + nch++, fd, EVFILT_READ, EV_ADD, 0, 0, ud);
+    if (mask & AE_WRITABLE) EV_SET(evs + nch++, fd, EVFILT_WRITE, EV_ADD, 0, 0, ud);
 
     return kevent(state->kqfd, evs, nch, NULL, 0, NULL);
 }
@@ -115,15 +119,17 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     struct kevent evs[2];
     int nch = 0;
 
-    if (mask & AE_READABLE) EV_SET(evs + nch++, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    if (mask & AE_WRITABLE) EV_SET(evs + nch++, fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    MsQuicUserData* ud = &(eventLoop->events[fd].msquicUD);
+
+    if (mask & AE_READABLE) EV_SET(evs + nch++, fd, EVFILT_READ, EV_DELETE, 0, 0, ud);
+    if (mask & AE_WRITABLE) EV_SET(evs + nch++, fd, EVFILT_WRITE, EV_DELETE, 0, 0, ud);
 
     kevent(state->kqfd, evs, nch, NULL, 0, NULL);
 }
 
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
-    int retval, numevents = 0;
+    int retval = 0;
 
     if (tvp != NULL) {
         struct timespec timeout;
@@ -135,7 +141,8 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     }
 
     if (retval > 0) {
-        int j;
+        int fi = 0;
+        int ei = 0;
 
         /* Normally we execute the read event first and then the write event.
          * When the barrier is set, we will do it reverse.
@@ -144,8 +151,17 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
          * events, which would make it impossible to control the order of
          * reads and writes. So we store the event's mask we've got and merge
          * the same fd events later. */
-        for (j = 0; j < retval; j++) {
+        for (int j = 0; j < retval; j++) {
             struct kevent *e = state->events + j;
+
+            MsQuicUserData* ud = e->udata;
+            if (ud == NULL || ud->type != CXPLAT_CQE_TYPE_USER_EVENT) {
+                eventLoop->firedExtra[ei].ud = ud;
+                eventLoop->firedExtra[ei].mask = e->filter;
+                ++ei;
+                continue;
+            }
+
             int fd = e->ident;
             int mask = 0;
 
@@ -158,26 +174,43 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 
         /* Re-traversal to merge read and write events, and set the fd's mask to
          * 0 so that events are not added again when the fd is encountered again. */
-        numevents = 0;
-        for (j = 0; j < retval; j++) {
+        for (int j = 0; j < retval; j++) {
             struct kevent *e = state->events + j;
+
+            MsQuicUserData* ud = e->udata;
+            if (ud == NULL || ud->type != CXPLAT_CQE_TYPE_USER_EVENT) {
+                continue;
+            }
             int fd = e->ident;
             int mask = getEventMask(state->eventsMask, fd);
-
             if (mask) {
-                eventLoop->fired[numevents].fd = fd;
-                eventLoop->fired[numevents].mask = mask;
+                eventLoop->fired[fi].fd = e->ident;
+                eventLoop->fired[fi].mask = mask;
+                ++fi;
                 resetEventMask(state->eventsMask, fd);
-                numevents++;
             }
         }
+        eventLoop->firedExtraNum = ei;
+        return fi;
     } else if (retval == -1 && errno != EINTR) {
         printf("aeApiPoll: kevent, %s\n", strerror(errno));
         fflush(stdout);
         exit(1);
+        return -1;
     }
+    eventLoop->firedExtraNum = 0;
+    return 0;
+}
 
-    return numevents;
+#define AE_HAS_API_REPLACE_EPFD 1
+static int aeApiReplaceEpfd(aeEventLoop *eventLoop, int kqfd) {
+    aeApiState *state = eventLoop->apidata;
+
+    if (kqfd) {
+        close(state->kqfd);
+        state->kqfd = kqfd;
+    }
+    return state->kqfd;
 }
 
 static char *aeApiName(void) {

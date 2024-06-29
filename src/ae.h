@@ -34,6 +34,8 @@
 #define __AE_H__
 
 #include "monotonic.h"
+#include <sys/time.h>
+#include "msquic_userdata.h"
 
 #define AE_OK 0
 #define AE_ERR -1
@@ -48,12 +50,14 @@
          things to disk before sending replies, and want                                                               \
          to do that in a group fashion. */
 
+/* aeEventLoop Flags */
 #define AE_FILE_EVENTS (1 << 0)
 #define AE_TIME_EVENTS (1 << 1)
 #define AE_ALL_EVENTS (AE_FILE_EVENTS | AE_TIME_EVENTS)
 #define AE_DONT_WAIT (1 << 2)
 #define AE_CALL_BEFORE_SLEEP (1 << 3)
 #define AE_CALL_AFTER_SLEEP (1 << 4)
+#define AE_FLAG_PREFER_POLL (1 << 17)
 
 #define AE_NOMORE -1
 #define AE_DELETED_EVENT_ID -1
@@ -75,6 +79,7 @@ typedef struct aeFileEvent {
     aeFileProc *rfileProc;
     aeFileProc *wfileProc;
     void *clientData;
+    MsQuicUserData msquicUD;
 } aeFileEvent;
 
 /* Time event structure */
@@ -96,6 +101,11 @@ typedef struct aeFiredEvent {
     int mask;
 } aeFiredEvent;
 
+typedef struct aeFiredExtra {
+    void* ud;
+    int mask;
+} aeFiredExtra;
+
 /* State of an event based program */
 typedef struct aeEventLoop {
     int maxfd;   /* highest file descriptor currently registered */
@@ -109,10 +119,15 @@ typedef struct aeEventLoop {
     aeBeforeSleepProc *beforesleep;
     aeBeforeSleepProc *aftersleep;
     int flags;
+
+    /* Extra fired events */
+    int firedExtraNum;
+    aeFiredExtra *firedExtra;
 } aeEventLoop;
 
 /* Prototypes */
 aeEventLoop *aeCreateEventLoop(int setsize);
+aeEventLoop *aeCreateEventLoop3(int setsize, int fd, int flags);
 void aeDeleteEventLoop(aeEventLoop *eventLoop);
 void aeStop(aeEventLoop *eventLoop);
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData);
@@ -134,5 +149,6 @@ void aeSetAfterSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *aftersleep);
 int aeGetSetSize(aeEventLoop *eventLoop);
 int aeResizeSetSize(aeEventLoop *eventLoop, int setsize);
 void aeSetDontWait(aeEventLoop *eventLoop, int noWait);
+int aePoll(aeEventLoop *eventLoop, struct timeval *tvp);
 
 #endif
