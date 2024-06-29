@@ -31,7 +31,6 @@
 #include "fmacros.h"
 #include "config.h"
 #include "solarisfixes.h"
-#include "serverassert.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -370,7 +369,7 @@ size_t zmalloc_usable_size(void *ptr) {
  * caller is responsible to provide the actual allocation size, which may be
  * different from the requested size. */
 static inline void zfree_internal(void *ptr, size_t size) {
-    assert(ptr != NULL);
+    // assert(ptr != NULL);
     update_zmalloc_stat_free(size);
 
 #ifdef USE_JEMALLOC

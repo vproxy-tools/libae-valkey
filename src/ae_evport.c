@@ -272,7 +272,9 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         if (errno == ETIME || errno == EINTR) return 0;
 
         /* Any other error indicates a bug. */
-        panic("aeApiPoll: port_getn, %s", strerror(errno));
+        printf("aeApiPoll: port_getn, %s\n", strerror(errno));
+        fflush(stdout);
+        exit(1);
     }
 
     state->npending = nevents;
