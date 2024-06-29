@@ -53,7 +53,7 @@
 #include "ae_evport.c"
 #else
 #ifdef HAVE_EPOLL
-#include "ae_epoll.c"
+#include "ae_epoll_poll.c"
 #else
 #ifdef HAVE_KQUEUE
 #include "ae_kqueue.c"
@@ -65,15 +65,20 @@
 
 
 aeEventLoop *aeCreateEventLoop(int setsize) {
+    return aeCreateEventLoop3(setsize, 0, 0);
+}
+
+aeEventLoop *aeCreateEventLoop3(int setsize, int epfd, int flags) {
     aeEventLoop *eventLoop;
+    int aeApiCreateSucceed = 0;
     int i;
 
     monotonicInit(); /* just in case the calling app didn't initialize */
-
     if ((eventLoop = zmalloc(sizeof(*eventLoop))) == NULL) goto err;
     eventLoop->events = zmalloc(sizeof(aeFileEvent) * setsize);
     eventLoop->fired = zmalloc(sizeof(aeFiredEvent) * setsize);
-    if (eventLoop->events == NULL || eventLoop->fired == NULL) goto err;
+    eventLoop->firedExtra = zmalloc(sizeof(aeFiredExtra) * setsize);
+    if (eventLoop->events == NULL || eventLoop->fired == NULL || eventLoop->firedExtra == NULL) goto err;
     eventLoop->setsize = setsize;
     eventLoop->timeEventHead = NULL;
     eventLoop->timeEventNextId = 0;
@@ -81,8 +86,17 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->maxfd = -1;
     eventLoop->beforesleep = NULL;
     eventLoop->aftersleep = NULL;
-    eventLoop->flags = 0;
+    eventLoop->flags = flags;
+    eventLoop->firedExtraNum = 0;
     if (aeApiCreate(eventLoop) == -1) goto err;
+    aeApiCreateSucceed = 1;
+    if (epfd) {
+#if AE_HAS_API_REPLACE_EPFD
+        if (epfd && epfd != aeApiReplaceEpfd(eventLoop, epfd)) goto err;
+#else
+        goto err;
+#endif
+    }
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
     for (i = 0; i < setsize; i++) eventLoop->events[i].mask = AE_NONE;
@@ -90,8 +104,12 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
 
 err:
     if (eventLoop) {
+        if (aeApiCreateSucceed) {
+            aeApiFree(eventLoop);
+        }
         zfree(eventLoop->events);
         zfree(eventLoop->fired);
+        zfree(eventLoop->firedExtra);
         zfree(eventLoop);
     }
     return NULL;
@@ -130,6 +148,7 @@ int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
 
     eventLoop->events = zrealloc(eventLoop->events, sizeof(aeFileEvent) * setsize);
     eventLoop->fired = zrealloc(eventLoop->fired, sizeof(aeFiredEvent) * setsize);
+    eventLoop->firedExtra = zrealloc(eventLoop->firedExtra, sizeof(aeFiredExtra) * setsize);
     eventLoop->setsize = setsize;
 
     /* Make sure that if we created new slots, they are initialized with
@@ -142,6 +161,7 @@ void aeDeleteEventLoop(aeEventLoop *eventLoop) {
     aeApiFree(eventLoop);
     zfree(eventLoop->events);
     zfree(eventLoop->fired);
+    zfree(eventLoop->firedExtra);
 
     /* Free the time events list. */
     aeTimeEvent *next_te, *te = eventLoop->timeEventHead;
@@ -164,12 +184,19 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc
         return AE_ERR;
     }
     aeFileEvent *fe = &eventLoop->events[fd];
-
-    if (aeApiAddEvent(eventLoop, fd, mask) == -1) return AE_ERR;
     fe->mask |= mask;
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
     fe->clientData = clientData;
+    // set data first, the fd might not be added from the poll thread, so we should make sure it's recorded
+
+    if (aeApiAddEvent(eventLoop, fd, mask) == -1) {
+        fe->mask = 0;
+        fe->rfileProc = NULL;
+        fe->wfileProc = NULL;
+        fe->clientData = NULL; // clear the clientData
+        return AE_ERR;
+    }
     if (fd > eventLoop->maxfd) eventLoop->maxfd = fd;
     return AE_OK;
 }
@@ -502,4 +529,8 @@ void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep
 
 void aeSetAfterSleepProc(aeEventLoop *eventLoop, aeAfterSleepProc *aftersleep) {
     eventLoop->aftersleep = aftersleep;
+}
+
+int aePoll(aeEventLoop *eventLoop, struct timeval *tvp) {
+    return aeApiPoll(eventLoop, tvp);
 }

@@ -30,14 +30,15 @@
 
 
 #include <sys/epoll.h>
+#include <errno.h>
 
-typedef struct aeApiState {
+typedef struct aeApiState_epoll {
     int epfd;
     struct epoll_event *events;
-} aeApiState;
+} aeApiState_epoll;
 
-static int aeApiCreate(aeEventLoop *eventLoop) {
-    aeApiState *state = zmalloc(sizeof(aeApiState));
+static int aeApiCreate_epoll(aeEventLoop *eventLoop) {
+    aeApiState_epoll *state = zmalloc(sizeof(aeApiState_epoll));
 
     if (!state) return -1;
     state->events = zmalloc(sizeof(struct epoll_event) * eventLoop->setsize);
@@ -56,39 +57,50 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     return 0;
 }
 
-static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
-    aeApiState *state = eventLoop->apidata;
+static int aeApiResize_epoll(aeEventLoop *eventLoop, int setsize) {
+    aeApiState_epoll *state = eventLoop->apidata;
 
     state->events = zrealloc(state->events, sizeof(struct epoll_event) * setsize);
     return 0;
 }
 
-static void aeApiFree(aeEventLoop *eventLoop) {
-    aeApiState *state = eventLoop->apidata;
+static void aeApiFree_epoll(aeEventLoop *eventLoop) {
+    aeApiState_epoll *state = eventLoop->apidata;
 
     close(state->epfd);
     zfree(state->events);
     zfree(state);
 }
 
-static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
-    aeApiState *state = eventLoop->apidata;
+static int aeApiAddEvent_epoll(aeEventLoop *eventLoop, int fd, int mask) {
+    aeApiState_epoll *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */
     /* If the fd was already monitored for some event, we need a MOD
      * operation. Otherwise we need an ADD operation. */
-    int op = eventLoop->events[fd].mask == AE_NONE ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+    int op = EPOLL_CTL_MOD;
 
     ee.events = 0;
     mask |= eventLoop->events[fd].mask; /* Merge old events */
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
-    ee.data.fd = fd;
-    if (epoll_ctl(state->epfd, op, fd, &ee) == -1) return -1;
+
+    MsQuicUserData* ud = &(eventLoop->events[fd].msquicUD);
+    ud->type = CXPLAT_CQE_TYPE_USER_EVENT;
+    ud->fd = fd;
+    ee.data.ptr = ud;
+
+    if (mask == 0) {
+        ee.events |= EPOLLET; // if we got EPOLLHUP, we would only get it once
+    }
+    if (epoll_ctl(state->epfd,op,fd,&ee) == -1 && errno == ENOENT) {
+        op = EPOLL_CTL_ADD;
+        if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
+    }
     return 0;
 }
 
 static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
-    aeApiState *state = eventLoop->apidata;
+    aeApiState_epoll *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */
 
     /* We rely on the fact that our caller has already updated the mask in the eventLoop. */
@@ -97,7 +109,12 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     ee.events = 0;
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
-    ee.data.fd = fd;
+
+    MsQuicUserData* ud = &(eventLoop->events[fd].msquicUD);
+    ud->type = CXPLAT_CQE_TYPE_USER_EVENT;
+    ud->fd = fd;
+    ee.data.ptr = ud;
+
     if (mask != AE_NONE) {
         epoll_ctl(state->epfd, EPOLL_CTL_MOD, fd, &ee);
     } else {
@@ -107,17 +124,18 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     }
 }
 
-static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
-    aeApiState *state = eventLoop->apidata;
+static int aeApiPoll_epoll(aeEventLoop *eventLoop, struct timeval *tvp) {
+    aeApiState_epoll *state = eventLoop->apidata;
     int retval, numevents = 0;
 
     retval = epoll_wait(state->epfd, state->events, eventLoop->setsize,
                         tvp ? (tvp->tv_sec * 1000 + (tvp->tv_usec + 999) / 1000) : -1);
     if (retval > 0) {
-        int j;
+        int fi = 0;
+        int ei = 0;
 
         numevents = retval;
-        for (j = 0; j < numevents; j++) {
+        for (int j = 0; j < numevents; j++) {
             int mask = 0;
             struct epoll_event *e = state->events + j;
 
@@ -125,16 +143,37 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             if (e->events & EPOLLOUT) mask |= AE_WRITABLE;
             if (e->events & EPOLLERR) mask |= AE_WRITABLE | AE_READABLE;
             if (e->events & EPOLLHUP) mask |= AE_WRITABLE | AE_READABLE;
-            eventLoop->fired[j].fd = e->data.fd;
-            eventLoop->fired[j].mask = mask;
+
+            MsQuicUserData* ud = e->data.ptr;
+            if (ud != NULL && ud->type == CXPLAT_CQE_TYPE_USER_EVENT) {
+                eventLoop->fired[fi].fd = ud->fd;
+                eventLoop->fired[fi].mask = mask;
+                ++fi;
+            } else {
+                eventLoop->firedExtra[ei].ud = ud;
+                eventLoop->firedExtra[ei].mask = e->events;
+                ++ei;
+            }
         }
+        eventLoop->firedExtraNum = ei;
+        return fi;
     } else if (retval == -1 && errno != EINTR) {
         panic("aeApiPoll: epoll_wait, %s", strerror(errno));
     }
-
-    return numevents;
+    eventLoop->firedExtraNum = 0;
+    return 0;
 }
 
-static char *aeApiName(void) {
+static int aeApiReplaceEpfd_epoll(aeEventLoop *eventLoop, int epfd) {
+    aeApiState_epoll *state = eventLoop->apidata;
+
+    if (epfd) {
+        close(state->epfd);
+        state->epfd = epfd;
+    }
+    return state->epfd;
+}
+
+static char *aeApiName_epoll(void) {
     return "epoll";
 }
