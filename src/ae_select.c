@@ -96,9 +96,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             numevents++;
         }
     } else if (retval == -1 && errno != EINTR) {
-        printf("aeApiPoll: select, %s\n", strerror(errno));
-        fflush(stdout);
-        exit(1);
+        panic("aeApiPoll: select, %s", strerror(errno));
     }
 
     return numevents;

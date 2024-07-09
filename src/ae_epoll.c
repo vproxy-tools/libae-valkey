@@ -87,10 +87,12 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     return 0;
 }
 
-static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
+static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */
-    int mask = eventLoop->events[fd].mask & (~delmask);
+
+    /* We rely on the fact that our caller has already updated the mask in the eventLoop. */
+    mask = eventLoop->events[fd].mask;
 
     ee.events = 0;
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
@@ -127,9 +129,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             eventLoop->fired[j].mask = mask;
         }
     } else if (retval == -1 && errno != EINTR) {
-        printf("aeApiPoll: epoll_wait, %s\n", strerror(errno));
-        fflush(stdout);
-        exit(1);
+        panic("aeApiPoll: epoll_wait, %s", strerror(errno));
     }
 
     return numevents;

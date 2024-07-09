@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include "serverassert.h"
 
 /* The function pointer for clock retrieval.  */
 monotime (*getMonotonicUs)(void) = NULL;
@@ -141,7 +142,7 @@ static void monotonicInit_posix(void) {
      * an appropriate alternate implementation.  */
     struct timespec ts;
     int rc = clock_gettime(CLOCK_MONOTONIC, &ts);
-    // assert(rc == 0);
+    assert(rc == 0);
 
     snprintf(monotonic_info_string, sizeof(monotonic_info_string), "POSIX clock_gettime");
     getMonotonicUs = getMonotonicUs_posix;

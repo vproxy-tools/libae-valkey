@@ -1,4 +1,4 @@
-SRC = src/ae.c src/anet.c src/zmalloc.c src/monotonic.c
+SRC = src/ae.c src/anet.c src/zmalloc.c src/monotonic.c src/serverassert.c
 OBJ = ${SRC:.c=.o}
 
 libae.a: $(OBJ)
