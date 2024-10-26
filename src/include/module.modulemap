@@ -1,0 +1,4 @@
+module libae {
+    header "../ae.h"
+    export *
+}
