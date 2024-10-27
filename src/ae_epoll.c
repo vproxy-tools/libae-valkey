@@ -99,7 +99,7 @@ static int aeApiAddEvent_epoll(aeEventLoop *eventLoop, int fd, int mask) {
     return 0;
 }
 
-static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
+static void aeApiDelEvent_epoll(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState_epoll *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */
 
